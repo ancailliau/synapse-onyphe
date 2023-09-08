@@ -1,0 +1,91 @@
+name: synapse-onyphe
+version: 0.0.1
+desc: The synapse-onyphe package provides commands to ingest and model data from Onyphe.
+
+synapse_minversion: [2, 144, 0]
+synapse_version: '>=2.144.0,<3.0.0'
+
+genopts:
+  dotstorm: true # Specify that storm command/module files end with ".storm"
+
+author:
+  url: https://ancailliau.github.io/
+  name: Antoine Cailliau - Cyantlabs
+
+
+perms:
+  - perm: [cyl, onyphe, user]
+    desc: Allows a user to lookup indicators on Onyphe
+    gate: cortex
+  - perm: [cyl, onyphe, admin]
+    desc: Allows a user to make global configuration changes
+    gate: cortex
+
+modules:
+  - name: cyl.onyphe.api
+  - name: cyl.onyphe.privsep
+    modconf:
+      source: 97a65f26e1f18e3b6d57fb09afd09186
+    asroot:perms:
+      - [cyl, onyphe, user]
+
+commands:
+  - name: cyl.onyphe.setup.apikey
+    descr: Set the Onyphe API key
+    perms:
+      - [cyl, onyphe, user]
+    cmdargs:
+      - - apikey
+        - type: str
+          help: The Onyphe API key
+      - - --self
+        - type: bool
+          default: false
+          action: store_true
+          help: Set the key as a user variable. If not used, the key is set globally.
+  
+  - name: cyl.onyphe.setup.tagprefix
+    descr: "Set the Onyphe tag tree prefix (default: `rep.onyphe`). Note that this won't migrate any existing tags under the previous prefix."
+    perms:
+      - [cyl, onyphe, admin]
+    cmdargs:
+      - - tagname
+        - type: str
+          help: The tag prefix to use
+
+  - name: cyl.onyphe.setup.proxy
+    descr: "Set the proxy to be used to query Onyphe."
+    perms:
+      - [cyl, onyphe, admin]
+    cmdargs:
+      - - proxy
+        - type: str
+          help: The proxy prefix to use
+
+  - name: cyl.onyphe.search
+    descr: Search an indicator on Onyphe Datascan dataset
+    perms:
+      - [cyl, onyphe, user]
+    cmdargs:
+      - - --query
+        - type: str
+          default: ''
+          help: Specify the OQL query.
+      - - --asof
+        - type: str
+          default: -30days
+          help: Specify the maximum age for a cached result. To disable caching, use --asof now.
+      - - --debug
+        - type: bool
+          default: false
+          action: store_true
+          help: Show verbose debug output.
+      - - --yield
+        - type: bool
+          default: false
+          action: store_true
+          help: Yield the newly created nodes.
+    forms:
+      output:
+        - inet:fqdn
+        - inet:ipv4

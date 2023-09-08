@@ -1,0 +1,5 @@
+init {
+    $privsep = $lib.import(cyl.onyphe.privsep)
+    $privsep.setProxy($cmdopts.proxy)
+    $lib.print("Changed the proxy to #{p}", p=$privsep.getProxy())
+}

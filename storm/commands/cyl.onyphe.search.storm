@@ -1,0 +1,14 @@
+init {
+    if $cmdopts.debug { $lib.debug = $lib.true }
+
+    $api = $lib.import(cyl.onyphe.api, debug=$lib.debug)
+    $privsep = $lib.import(cyl.onyphe.privsep, debug=$lib.debug)
+}
+
+$data = $lib.false
+$lib.print("Test")
+
+$data = $api.lookup($cmdopts.query, $cmdopts.asof)
+$lib.print("[+] OK")
+
+divert $cmdopts.yield $data

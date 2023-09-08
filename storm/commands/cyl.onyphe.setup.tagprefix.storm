@@ -1,0 +1,5 @@
+init {
+    $privsep = $lib.import(cyl.onyphe.privsep)
+    $privsep.setTagPrefix($cmdopts.tagname)
+    $lib.print("Changed the Onyphe tag prefix to #{p}", p=$privsep.getTagPrefix())
+}

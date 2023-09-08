@@ -1,0 +1,429 @@
+// Name of the dictionary key used to store the Onyphe API key
+$apiKeyName = "cyl.onyphe:apikey"
+
+// Name of the dictionary key to store the Onyphe tag prefix
+$tagPrefixKeyName = "cyl.onyphe:tag-prefix"
+
+// Name of the dictionary key to store the Onyphe tag prefix
+$proxyKeyName = "cyl.onyphe:proxy"
+
+// Get the Onyphe API key
+// Args: n/a
+// Returns: str (the API key)
+function getApiKey() {
+    // see if the user has their own key set
+    $apikey = $lib.user.vars.get($apiKeyName)
+    if ($apikey) {
+        return($apikey)
+    }
+
+    // no user key, check for global
+    $apikey = $lib.globals.get($apiKeyName)
+    if ($apikey) {
+        return($apikey)
+    }
+
+    // no key in either, bail
+    $lib.exit("Onyphe API key is not set. Use cyl.onyphe.setup.apikey to set one.")
+}
+
+// Set the Onyphe API key
+// Args:
+//  - key (str): the API key to save
+//  - user (bool): if true, key will be stored to user vars instead of globals
+// Returns: n/a
+function setApiKey(key, user) {
+    if ($user) {
+        $lib.user.vars.set($apiKeyName, $key)
+    } else {
+        $lib.globals.set($apiKeyName, $key)
+    }
+}
+
+// Get the Onyphe tag prefix
+// Args: n/a
+// Returns: str (the tag prefix)
+function getTagPrefix() {
+    return($lib.globals.get($tagPrefixKeyName, default=rep.onyphe))
+}
+
+// Set the Onyphe tag prefix
+// Args:
+//  - prefix (str): the tag prefix to save
+// Returns: n/a
+function setTagPrefix(prefix) {
+    ($ok, $norm) = $lib.trycast(syn:tag:part, $prefix)
+    if (not $ok) {
+        $lib.warn("failed to set tag prefix, invalid value: {s}", s=$prefix)
+        return($lib.null)
+    }
+
+    $lib.globals.set($tagPrefixKeyName, $prefix)
+}
+
+// Get the proxy
+// Args: n/a
+// Returns: str (the tag prefix)
+function getProxy() {
+    if ($lib.globals.get($proxyKeyName, default='')='') {
+        return($lib.false)
+    }
+    return($lib.globals.get($proxyKeyName, default=''))
+}
+
+// Set the proxy
+// Args:
+//  - prefix (str): the tag prefix to save
+// Returns: n/a
+function setProxy(proxy) {
+    ($ok, $norm) = $lib.trycast(inet:url, $proxy)
+    if (not $ok and not $proxy = '') {
+        $lib.warn("failed to set proxy, invalid value: {s}", s=$proxy)
+        return($lib.null)
+    }
+
+    $lib.globals.set($proxyKeyName, $proxy)
+}
+
+// Make an API call to Onyphe
+// Args
+//   - $querystr (str): Query string to append to the POST body (which this function will add the API key to)
+// Returns: prim (JSON dictionary) or $lib.false
+function makeOnypheApiCall(querystr, asof, page=1) {
+    $url = $lib.str.format("https://www.onyphe.io/api/v2/search/?q={q}&page={page}", q=$querystr, page=$page)
+
+    $cachedData = $lib.jsonstor.cacheget("cyl.onyphe.http", $url, $asof)
+    if ($cachedData) {
+        if $lib.debug { $lib.print("using cached data for http query: {s}", s=$url) }
+        return($cachedData)
+    }
+
+    $authorization = $lib.str.format("bearer {k}", k=$getApiKey())
+
+    if $lib.debug {
+        $lib.print("Will query {q}", q=$url)
+    }
+
+    $resp = $lib.inet.http.get($url, 
+        headers=({"content-type": "application/json", "Authorization": $authorization}), 
+        proxy=$getProxy())
+
+    if $lib.debug {
+        $lib.print("Received {code}", code=$resp.code)
+    }
+
+    if ($resp.code != 200) { 
+        if ($resp.code = 429) {
+            $lib.warn("Reaching rate limit on Onyphe API")
+        }
+
+        if ($resp.code = 400) {
+            $lib.warn("Invalid request or API key on Onyphe")
+        }
+
+        return($lib.false) 
+    }
+
+    $j = $resp.json()
+    $ret = $lib.jsonstor.cacheset("cyl.onyphe.http", $url, $j)
+    if $lib.debug { $lib.print("wrote http query cache data for {s}: {r}", s=$url, r=$ret) }
+
+    return($j)
+}
+
+// Get the proper meta:source node for Onyphe
+// Args: n/a
+// Returns: meta:source node
+function getMetaSource() {
+    [ meta:source=$modconf.source :name="onyphe" ]
+    return($node)
+}
+
+// Model the response for a onyphe datascan entry
+// Args:
+//   - $node: node to model tags on
+//   - $data: dict of data from Onyphe
+// Returns: n/a
+function modelLookupResponse(node, data) {
+    
+    $seen_ts = $lib.time.parse($data.'@timestamp', "%Y-%m-%dT%H:%M:%S.%fZ")
+    $now = $lib.time.now()
+    $srcnode = $getMetaSource()
+    $src = $lib.regex.replace("::", "_", $data.source)
+
+    $prefix = $getTagPrefix()
+
+    $tags = $lib.list()
+    for $t in $data.tag { 
+        $tags.append($t)
+    }
+
+    if ($data.device.class) {
+        $tags.append($lib.str.format("dev.class.{src}", src=$data.device.class))
+    }
+
+    if ($data.device.product) {
+        $tags.append($lib.str.format("dev.product.{src}", src=$data.device.class))
+    }
+
+    if ($data.device.productvendor) {
+        $tags.append($lib.str.format("dev.vendor.{src}", src=$data.device.class))
+    }
+
+    $tags.append($lib.str.format("src.{src}", src=$src))
+    
+    // add tags to the indicator
+    yield $node | { for $tag in $tags {
+        $t = $lib.str.join('.', ($prefix, $tag))
+        [ +#$t=$seen_ts ]
+    } }
+
+    // add edge to the meta:source node
+    [ <(seen)+ { yield $srcnode } .seen=$seen_ts ]
+
+    fini { return() }
+}
+
+// Model the exported data from Onyphe DataScan. Creates nodes.
+// Args:
+//   - $data: list of dicts of data from DataScan
+// Yields nodes
+function modelExportResponse(d) {
+
+    if ($d.'@category' = "resolver") {
+        ($ok, $norm) = $lib.trycast(inet:fqdn, $d.hostname)
+        if $ok {
+            [( inet:dns:a=($norm,$d.ip) .seen=$lib.time.parse($d.'@timestamp', "%Y-%m-%dT%H:%M:%S.%fZ") )] { $modelLookupResponse($node, $d) }
+        }
+
+        continue
+    }
+
+    if ($d.'@category' = "whois") {
+        ($ok, $norm) = $lib.trycast(inet:fqdn, $d.hostname)
+        $asof_whois = $lib.time.parse($d.'@timestamp', "%Y-%m-%dT%H:%M:%S.%fZ")
+
+        if $ok {
+
+            [( inet:whois:rec=($norm, $asof_whois)
+                    :text=$d.data )]
+
+        } elif ($d.type = "ip" ) {
+            ($ok, $norm) = $lib.trycast(inet:cidr4, $d.subnet)
+            if $ok {
+
+                [( inet:whois:iprec=$lib.guid(($norm, $asof_whois))
+                        :text=$d.data
+                        :net4=$norm
+                        :asn=$d.asn.strip("AS")
+                        :country?=$d.country )]
+
+            } else {
+                ($ok, $norm) = $lib.trycast(inet:cidr6, $d.subnet)
+                if $ok {
+
+                    [( inet:whois:iprec=$lib.guid(($norm, $asof_whois))
+                            :net6=$norm
+                            :text=$d.data
+                            :asn=$d.asn.strip("AS")
+                            :country?=$d.country )]
+
+                    
+                            
+                }
+
+            }    
+
+            if ($d.abuse and $d.abuse.size() > 0) {
+                if ($lib.vars.type($d.abuse) = "str") {
+
+                        { [( inet:whois:ipcontact=$lib.guid((onyphe, $d.abuse, $asof_whois))
+                            :contact=$lib.gen.psContactByEmail(onyphe.ipabuse, $d.abuse)
+                            :asof=$asof_whois
+                            :role=abuse
+                            :asn=$d.asn.strip('AS') )] }
+
+                } elif ($lib.vars.type($d.abuse) = "list") {
+                    for $a in $d.abuse {
+
+                        { [( inet:whois:ipcontact=$lib.guid((onyphe, $a, $asof_whois))
+                            :contact=$lib.gen.psContactByEmail(onyphe.ipabuse, $a)
+                            :asof=$asof_whois
+                            :role=abuse
+                            :asn=$d.asn.strip("AS") )] }
+
+                    }
+                }
+            }
+
+            if ($d.asn) {
+                $lib.print("Adding ASN")
+                { [( inet:asn=$d.asn.strip("AS") :name=$d.netname )] }
+            }
+
+        } else {
+            $lib.warn("Unsupport WHOIS record {type}", type=$d.type)
+        }
+
+        
+        continue
+    }
+
+    if ($d.'@category' != "datascan" and $d.'@category' != "synscan") {
+        $lib.warn("got an unsupported indicator type from onyphe: {s}", s=$d.'@category')
+        continue
+    }
+
+    if ($d.transport = $lib.null and $d.'@category' = 'synscan') {
+        $d.transport = tcp
+    }
+
+    if ($d.transport and $d.port) {
+        $server_format = $lib.str.format("{transport}://{ip}:{port}", transport=$d.transport, ip=$d.ip, port=$d.port)
+        [ inet:flow=$lib.guid(ipportdate, $d.ip, $d.port, $d.seen_date, cyl-onyphe) :dst=$server_format ]
+    }
+
+    if ($d.cpe) {
+        $cpes = $lib.list()
+
+        if ($lib.vars.type($d.cpe) = 'str') {
+            $cpes.append($d.cpe)
+
+        } elif ($lib.vars.type($d.cpe) = 'list') {
+            for $cpe in $d.cpe {
+                ($ok, $norm) = $lib.trycast(it:sec:cpe, $cpe)
+                if $ok {
+                    $cpes.append($norm)
+                } else {
+                    $lib.warn("Failed to parse CPE: {cpe}", cpe=$cpe)
+                }
+            }
+        }
+        [ :dst:cpes=$cpes ]
+    }
+
+    if ($d.subnet) {
+        $lib.print("Adding subnets")
+        ($ok, $norm) = $lib.trycast(inet:cidr4, $d.subnet)
+        if $ok {
+            { [( inet:cidr4=$norm +(includes)> { inet:ipv4=$d.ip } )] }
+        }
+        ($ok, $norm) = $lib.trycast(inet:cidr6, $d.subnet)
+        if $ok {
+            { [( inet:cidr6=$norm +(includes)> { inet:ipv4=$d.ip } )] }
+        }
+    }
+
+    if ($d.asn) {
+        $lib.print("Adding ASN")
+        { [( inet:asn=$d.asn.strip("AS") :name=$d.geolocus.netname )] }
+    }
+    
+    if ($d.ipv6 = "false") {
+        $lib.print("Adding IPV4")
+        { [( inet:ipv4=$d.ip :asn?=$d.asn.strip("AS") :latlong?=$d.geolocus.location )] { $modelLookupResponse($node, $d) } }
+    } else {
+        $lib.print("Adding IPV6")
+        { [( inet:ipv6=$d.ip :asn?=$d.asn.strip("AS") )] { $modelLookupResponse($node, $d) } }
+    }
+
+    if ($d.domain) {
+        $lib.print("Adding domains")
+        for $h in $d.domain {
+            ($ok, $norm) = $lib.trycast(inet:fqdn, $h)
+            if $ok {
+                { [( inet:fqdn=$norm )] }
+            }
+        }
+    }
+
+    if ($d.subdomain) {
+        $lib.print("Adding subdomains")
+        for $h in $d.subdomain {
+            ($ok, $norm) = $lib.trycast(inet:fqdn, $h)
+            if $ok {
+                { [( inet:fqdn=$norm )] }
+            }
+        }
+    }
+
+    if ($d.hostname) {
+        $lib.print("Adding hostname")
+
+        if ($lib.vars.type($d.hostname) = 'str') {
+            ($ok, $norm) = $lib.trycast(inet:fqdn, $h.hostname)
+            if $ok {
+                { [( inet:dns:a=($norm,$d.ip) )] }
+            }
+
+        } elif ($lib.vars.type($d.hostname) = 'list') {
+            for $h in $d.subdomain {
+                ($ok, $norm) = $lib.trycast(inet:fqdn, $h)
+                if $ok {
+                    { [( inet:fqdn=$norm )] }
+                }
+            }
+        }
+    }
+
+    // TODO: Unclear what is right link between FQDN and IP address
+    // TODO: hostname
+
+    if ($d.data = "<nodata>") {
+        $lib.print("Adding Server")
+        { [ inet:server=$server_format ] }
+    } else {
+        if ($d.data and $d.data.size() > 0) {
+            $lib.print("Adding Banner")
+            { [ inet:banner=($server_format,$d.data) ] }
+        }
+    }
+
+    if ($d.subject) {
+        $lib.print("Adding cert")
+
+        { [( crypto:x509:cert=$lib.guid(($d.fingerprint.sha256,))
+            :md5?=$d.fingerprint.md5 
+            :sha1?=$d.fingerprint.sha1 
+            :sha256?=$d.fingerprint.sha256 
+            :serial?=$d.serial 
+            :validity:notbefore=$lib.time.parse($d.validity.notbefore, "%Y-%m-%dT%H:%M:%SZ") 
+            :validity:notafter=$lib.time.parse($d.validity.notafter, "%Y-%m-%dT%H:%M:%SZ") )] }
+
+        // TODO Link the certificate to the flow
+    }
+
+    if ($d.app) {
+        $lib.print("add app")
+
+        if ($d.app.favicon) {
+
+            if ($d.app.favicon.image and $d.app.favicon.image.size() > 0) {
+                // $lib.print("String: {s}", s=$lib.base64.decode($d.app.favicon.image))
+                ($size, $sha256) = $lib.bytes.put($lib.base64.decode($d.app.favicon.image))
+                $lib.print("Uploaded {sha} ({size})", sha=$sha256, size=$size)
+            
+                if ($size != $d.app.favicon.length) {
+                    $lib.warn("The upload file has a different size than the one scanned")
+                }
+
+                { [( file:bytes=$sha256
+                    :md5=$d.app.favicon.imagemd5 
+                    :sha256=$sha256
+                    :size=$size )] }
+            }
+
+            if ($d.app.favicon.url) {
+                { [( inet:http:request=$lib.guid((onyphe,$d.app.favicon.url,$d.'@timestamp')) 
+                        :method=GET 
+                        :path=$d.app.favicon.url 
+                        :server=$server_format )] }
+            }
+        }
+        if ($d.app.http) {
+            if ($d.app.http.url) {
+                { [( inet:http:request=$lib.guid((onyphe,$d.app.http.url,$d.'@timestamp')) :method=GET :path=$d.app.http.url :server=$server_format )] }
+            }
+        }
+    }
+}
