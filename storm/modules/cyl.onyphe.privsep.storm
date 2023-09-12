@@ -126,6 +126,7 @@ function makeOnypheStreamApiCall(querystr, asof, endpoint='search', page=1) {
 //   - $querystr (str): Query string to append to the POST body (which this function will add the API key to)
 // Returns: prim (JSON dictionary) or $lib.false
 function makeOnypheApiCall(querystr, asof, endpoint='search', page=1) {
+    $n = $lib.time.now()
     $url = $lib.str.format("https://www.onyphe.io/api/v2/{endpoint}/?q={q}&page={page}", endpoint=$endpoint, q=$querystr, page=$page)
 
     $cachedData = $lib.jsonstor.cacheget("cyl.onyphe.http", $url, $asof)
@@ -163,6 +164,12 @@ function makeOnypheApiCall(querystr, asof, endpoint='search', page=1) {
     $j = $resp.json()
     $ret = $lib.jsonstor.cacheset("cyl.onyphe.http", $url, $j)
     if $lib.debug { $lib.print("wrote http query cache data for {s}: {r}", s=$url, r=$ret) }
+
+    [ it:exec:query=$lib.guid((onyphe, querystr, $getApiKey(), $n))
+        :text=$querystr
+        :api:url=$url
+        :language=oql
+        :time=$n ] // Needs to be linked with -(found)> to the inet:flow
 
     return($j)
 }
