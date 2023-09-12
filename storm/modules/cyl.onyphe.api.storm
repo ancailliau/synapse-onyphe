@@ -10,7 +10,7 @@ function __makeLookupRequest(query, asof) {
     $max_page = 1
 
     while(1) {
-        $resp = $privsep.makeOnypheApiCall($query, $asof, ($current_page + 1))
+        $resp = $privsep.makeOnypheApiCall($query, $asof, 'search', ($current_page + 1))
         
         if ($resp and $resp.error = 0) {
             if $lib.debug {
@@ -28,6 +28,28 @@ function __makeLookupRequest(query, asof) {
         $max_page = $resp.max_page
         if ($current_page >= $max_page) { stop }
 
+    }
+}
+
+
+// (MODULE INTERNAL ONLY)
+// Make a lookup request to Onyphe
+// Args
+//   - $querystr (str): Query string
+// Returns: dict of results or $lib.false on failure
+function __makeExportRequest(query, asof) {
+    $resp = $privsep.makeOnypheStreamApiCall($query, $asof, 'export')
+    
+    if ($resp and $resp.error = 0) {
+        if $lib.debug {
+            $lib.print("Got a successful response with {c} results", c=$resp.count)
+        }
+
+        for $item in $resp.results { emit $item }
+
+    } else {
+        $lib.warn("got a bad response from Onyphe for query: {q}", q=$query)
+        stop
     }
 }
 

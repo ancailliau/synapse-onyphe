@@ -89,8 +89,44 @@ function setProxy(proxy) {
 // Args
 //   - $querystr (str): Query string to append to the POST body (which this function will add the API key to)
 // Returns: prim (JSON dictionary) or $lib.false
-function makeOnypheApiCall(querystr, asof, page=1) {
-    $url = $lib.str.format("https://www.onyphe.io/api/v2/search/?q={q}&page={page}", q=$querystr, page=$page)
+function makeOnypheStreamApiCall(querystr, asof, endpoint='search', page=1) {
+    $url = $lib.str.format("https://www.onyphe.io/api/v2/{endpoint}/?q={q}&page={page}", endpoint=$endpoint, q=$querystr, page=$page)
+    
+    $authorization = $lib.str.format("bearer {k}", k=$getApiKey())
+
+    if $lib.debug {
+        $lib.print("Will query {q}", q=$url)
+    }
+
+    $resp = $lib.inet.http.get($url, 
+        headers=({"content-type": "application/json", "Authorization": $authorization}), 
+        proxy=$getProxy())
+
+    if $lib.debug {
+        $lib.print("Received {code}", code=$resp.code)
+    }
+
+    if ($resp.code != 200) { 
+        if ($resp.code = 429) {
+            $lib.warn("Reaching rate limit on Onyphe API")
+        }
+
+        if ($resp.code = 400) {
+            $lib.warn("Invalid request or API key on Onyphe")
+        }
+
+        return($lib.false) 
+    }
+
+    return($j)
+}
+
+// Make an API call to Onyphe
+// Args
+//   - $querystr (str): Query string to append to the POST body (which this function will add the API key to)
+// Returns: prim (JSON dictionary) or $lib.false
+function makeOnypheApiCall(querystr, asof, endpoint='search', page=1) {
+    $url = $lib.str.format("https://www.onyphe.io/api/v2/{endpoint}/?q={q}&page={page}", endpoint=$endpoint, q=$querystr, page=$page)
 
     $cachedData = $lib.jsonstor.cacheget("cyl.onyphe.http", $url, $asof)
     if ($cachedData) {
@@ -189,7 +225,8 @@ function modelLookupResponse(node, data) {
 //   - $data: list of dicts of data from DataScan
 // Yields nodes
 function modelExportResponse(d) {
-
+    $srcnode = $getMetaSource()
+    
     if ($d.'@category' = "resolver") {
         ($ok, $norm) = $lib.trycast(inet:fqdn, $d.hostname)
         if $ok {
@@ -211,27 +248,20 @@ function modelExportResponse(d) {
         } elif ($d.type = "ip" ) {
             ($ok, $norm) = $lib.trycast(inet:cidr4, $d.subnet)
             if $ok {
-
-                [( inet:whois:iprec=$lib.guid(($norm, $asof_whois))
+                [( inet:whois:iprec=$lib.guid((onyphe, $norm))
                         :text=$d.data
                         :net4=$norm
                         :asn=$d.asn.strip("AS")
                         :country?=$d.country )]
-
             } else {
                 ($ok, $norm) = $lib.trycast(inet:cidr6, $d.subnet)
                 if $ok {
-
-                    [( inet:whois:iprec=$lib.guid(($norm, $asof_whois))
+                    [( inet:whois:iprec=$lib.guid((onyphe, $norm))
                             :net6=$norm
                             :text=$d.data
                             :asn=$d.asn.strip("AS")
                             :country?=$d.country )]
-
-                    
-                            
                 }
-
             }    
 
             if ($d.abuse and $d.abuse.size() > 0) {
@@ -241,7 +271,7 @@ function modelExportResponse(d) {
                             :contact=$lib.gen.psContactByEmail(onyphe.ipabuse, $d.abuse)
                             :asof=$asof_whois
                             :role=abuse
-                            :asn=$d.asn.strip('AS') )] }
+                            :asn=$d.asn.strip('AS')  )] }
 
                 } elif ($lib.vars.type($d.abuse) = "list") {
                     for $a in $d.abuse {
@@ -313,6 +343,31 @@ function modelExportResponse(d) {
             { [( inet:cidr6=$norm +(includes)> { inet:ipv4=$d.ip } )] }
         }
     }
+
+    if ($d.geolocus) {
+        $asof_whois = $lib.time.parse($d.'@timestamp', "%Y-%m-%dT%H:%M:%S.%fZ")
+        ($ok, $norm) = $lib.trycast(inet:cidr4, $d.geolocus.subnet)
+        if $ok {
+            { [( inet:whois:iprec=$lib.guid((onyphe, $norm))
+                    :net4=$norm
+                    :asn=$d.geolocus.asn.strip("AS")
+                    :name=$d.geolocus.netname
+                    :country?=$d.country <(ipwhois)+ { inet:ipv4=$d.ip } <(seen)+ { yield $srcnode } )] }
+        } else {
+            ($ok, $norm) = $lib.trycast(inet:cidr6, $d.geolocus.subnet)
+            if $ok {
+                { [( inet:whois:iprec=$lib.guid((onyphe, $norm))
+                        :net6=$norm
+                        :asn=$d.geolocus.asn.strip("AS")
+                        :name=$d.geolocus.netname
+                        :country?=$d.country <(ipwhois)+ { inet:ipv6=$d.ip } <(seen)+ { yield $srcnode } )] }
+            } else {
+                $lib.warn("Onyphe returned invalid CIDR '{s}'", s=$d.geolocus.subnet)
+            }
+        } 
+
+    }   
+
 
     if ($d.asn) {
         $lib.print("Adding ASN")
@@ -422,7 +477,19 @@ function modelExportResponse(d) {
         }
         if ($d.app.http) {
             if ($d.app.http.url) {
-                { [( inet:http:request=$lib.guid((onyphe,$d.app.http.url,$d.'@timestamp')) :method=GET :path=$d.app.http.url :server=$server_format )] }
+                { [( inet:http:request=$lib.guid((onyphe,$d.app.http.url,$d.'@timestamp')) 
+                        :method=GET 
+                        :path=$d.app.http.url 
+                        :server=$server_format 
+                        :flow={ inet:flow=$lib.guid(ipportdate, $d.ip, $d.port, $d.seen_date, cyl-onyphe) } )] }
+            } else {
+                { [( inet:http:request=$lib.guid((onyphe,$d.app.http.url,$d.'@timestamp')) 
+                    :method=GET 
+                    :server=$server_format 
+                    :flow={ inet:flow=$lib.guid(ipportdate, $d.ip, $d.port, $d.seen_date, cyl-onyphe) } )] }
+            }
+            if ($d.app.http.title) {
+                { [( it:dev:str=$d.app.http.title <(refs)+ { inet:http:request=$lib.guid((onyphe,$d.app.http.url,$d.'@timestamp')) } ) ] }
             }
         }
     }
